@@ -1,0 +1,17 @@
+version: '3.7'
+services:
+
+  train:
+    build:
+      context: .
+    container_name: movie
+    volumes:
+      - ./src:/work
+    tty: True
+    deploy:
+      resources:
+        reservations:
+          devices:
+          - driver: nvidia
+            capabilities: [gpu]
+
