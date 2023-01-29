@@ -51,19 +51,17 @@ def create_vocab(df:pd.DataFrame,save_path:str):
     write_lines(save_path,vocab)
     return vocab
 
-def nameIds2onehot(vocab:list,nameId:str):
-    nameIdVocab = [tmp.split("\t")[0] for tmp in vocab]
-    nameIdOnehot = np.eye(len(nameIdVocab))[[nameIdVocab.index(nameId)]][0]
-    return nameIdOnehot
+def nameIds2index(vocab:dict,nameIds:list):
+    return [vocab[nameId] for nameId in nameIds]
 
 class CreateDataset(Dataset):
-    def __init__(self, title:str, directorIds:pd.DataFrame, writerIds:pd.DataFrame, starringIds:pd.DataFrame, rating:float, vocab:list, tokenizer, max_len:int):
+    def __init__(self, title:str, directorIds:pd.DataFrame, writerIds:pd.DataFrame, starringIds:pd.DataFrame, rating:float, vocab_size:int, tokenizer, max_len:int):
         self.title = title
         self.directorIds = directorIds
         self.writerIds = writerIds
         self.starringIds = starringIds
         self.rating = rating
-        self.vocab = vocab
+        self.vocab_size = vocab_size
         self.tokenizer = tokenizer
         self.max_len = max_len
 
@@ -84,17 +82,17 @@ class CreateDataset(Dataset):
 
         idx_directors = [None for _ in range(2)]
         for i in range(2):
-            idx_directors[i] = nameIds2onehot(self.vocab,self.directorIds["directorId"+str(i+1)][index])
+            idx_directors[i] = torch.nn.functional.one_hot(torch.tensor(self.directorIds["directorId"+str(i+1)][index]),num_classes=self.vocab_size).float()
 
         idx_writers = [None for _ in range(4)]
         for i in range(4):
-            idx_writers[i] = nameIds2onehot(self.vocab,self.writerIds["writerId"+str(i+1)][index])
+            idx_writers[i] = torch.nn.functional.one_hot(torch.tensor(self.writerIds["writerId"+str(i+1)][index]),num_classes=self.vocab_size).float()
 
         idx_starrings = [None for _ in range(6)]
         for i in range(6):
-            idx_starrings[i] = nameIds2onehot(self.vocab,self.starringIds["starringId"+str(i+1)][index])
+            idx_starrings[i] = torch.nn.functional.one_hot(torch.tensor(self.starringIds["starringId"+str(i+1)][index]),num_classes=self.vocab_size).float()
 
-        rating = self.rating[index]
+        rating = torch.tensor(self.rating[index]).float()
 
         return {
             'ids_title': torch.LongTensor(ids_title),
@@ -111,7 +109,7 @@ class CreateDataset(Dataset):
             'starringId4':torch.FloatTensor(idx_starrings[3]),
             'starringId5':torch.FloatTensor(idx_starrings[4]),
             'starringId6':torch.FloatTensor(idx_starrings[5]),
-            'rating': torch.from_numpy(np.asarray(rating)).float()
+            'rating': torch.FloatTensor(rating)
         }
 
 class EarlyStopping:
@@ -139,13 +137,13 @@ class EarlyStopping:
         self.delta = delta
         self.trace_func = trace_func
 
-    def __call__(self, epoch, lr, batch, drop_rate, val_loss, model):
+    def __call__(self, epoch, lr, batch, drop_rate, val_loss, model,mode):
 
         score = -val_loss
 
         if self.best_score is None:
             self.best_score = score
-            self.save_checkpoint(epoch, lr, batch, drop_rate, val_loss, model)
+            self.save_checkpoint(epoch, lr, batch, drop_rate, val_loss, model,mode)
         elif score < self.best_score + self.delta:
             self.counter += 1
             self.trace_func(f'EarlyStopping counter: {self.counter} out of {self.patience}')
@@ -153,27 +151,47 @@ class EarlyStopping:
                 self.early_stop = True
         else:
             self.best_score = score
-            self.save_checkpoint(epoch, lr, batch, drop_rate, val_loss, model)
+            self.save_checkpoint(epoch, lr, batch, drop_rate, val_loss, model,mode)
             self.counter = 0
 
-    def save_checkpoint(self, epoch, lr, batch, drop_rate, val_loss, model):
+    def save_checkpoint(self, epoch, lr, batch, drop_rate, val_loss, model,mode):
         '''Saves model when validation loss decrease.'''
         if self.verbose:
             self.trace_func(f'Validation loss decreased ({self.val_loss_min:.6f} --> {val_loss:.6f}).  Saving model ...')
-        if drop_rate is None:
-            torch.save({"epoch": epoch,"model_state_dict":model.state_dict()}, f"model/{model.__class__.__name__}.lr{lr}.batch{batch}.epoch{epoch}.undersampling.pt")
+        if mode == 0:
+            torch.save({"epoch": epoch,"model_state_dict":model.state_dict()}, f"model/{model.__class__.__name__}.rotten.lr{lr}.batch{batch}.drop{drop_rate}.epoch{epoch}.pt")
         else:
-            torch.save({"epoch": epoch,"model_state_dict":model.state_dict()}, f"model/{model.__class__.__name__}.lr{lr}.batch{batch}.drop{drop_rate}.epoch{epoch}.pt")
+             torch.save({"epoch": epoch,"model_state_dict":model.state_dict()}, f"model/{model.__class__.__name__}.fresh.lr{lr}.batch{batch}.drop{drop_rate}.epoch{epoch}.pt")
         self.val_loss_min = val_loss
 
-def create_dataset(path:str,vocab:list):
+def create_dataset(path:str,vocab:dict,mode=0):
     tokenizer = BertTokenizer.from_pretrained("bert-base-cased")
     df = load_pickle(path)
+    for i in range(2):
+        df["directorId"+str(i+1)] = nameIds2index(vocab,df["directorId"+str(i+1)])
+    for i in range(4):
+        df["writerId"+str(i+1)] = nameIds2index(vocab,df["writerId"+str(i+1)])
+    for i in range(6):
+        df["starringId"+str(i+1)] = nameIds2index(vocab,df["starringId"+str(i+1)])
+    
+    if mode == 0:
+        df["rating"] = df["rating"].mask(df["rating"]<5.18,1)
+        df["rating"] = df["rating"].mask(df["rating"]>=5.18,0)
+    else:
+        df["rating"] = df["rating"].mask(df["rating"]<7.28,0)
+        df["rating"] = df["rating"].mask(df["rating"]>=7.28,1)
+
+    df["rating"] = df["rating"].astype("int")
+
+    print(0,"\t",len(df[df["rating"]==0]))
+    print(1,"\t",len(df[df["rating"]==1]))
+    print()
+
     dataset = CreateDataset(
                 df["title"], df[["directorId1","directorId2"]], \
                 df[["writerId1","writerId2","writerId3","writerId4"]],\
                 df[["starringId1","starringId2","starringId3","starringId4","starringId5","starringId6"]],\
-                df["rating"], vocab,\
+                df["rating"],len(vocab), \
                 tokenizer, 128
                 )
-    return dataset
+    return dataset,torch.tensor(len(df[df["rating"]==0])//len(df[df["rating"]==1]))
